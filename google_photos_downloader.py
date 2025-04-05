@@ -16,12 +16,14 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
+from tqdm import tqdm
 
 # --- Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/photoslibrary.readonly']
@@ -66,7 +68,7 @@ This script downloads your Google Photos albums using the Google Photos API.
         - Download the JSON file. Rename it to `credentials.json` and place it in the same directory as this script.
 3.  **Python Libraries:** Install the required libraries:
     ```bash
-    pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
+    pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib requests tqdm
     ```
 
 ## Usage
@@ -108,57 +110,55 @@ Downloaded albums will be saved as `.zip` files in the `google_photos_downloads`
 - Very large albums might take a significant amount of time and bandwidth to download.
 """
 
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # --- Authentication ---
 def authenticate() -> Any:
     """Handles OAuth 2.0 authentication."""
     creds = None
-    # The file token.json stores the user's access and refresh tokens, and is
-    # created automatically when the authorization flow completes for the first time.
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE, 'rb') as token:
                 creds = pickle.load(token)
         except (pickle.UnpicklingError, EOFError, FileNotFoundError) as e:
-            print(f"Error loading token file: {e}. Need to re-authenticate.")
+            logger.error(f"Error loading token file: {e}. Need to re-authenticate.")
             creds = None # Force re-authentication
 
-    # If there are no (valid) credentials available, let the user log in.
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
-                print("Refreshing access token...")
+                logger.info("Refreshing access token...")
                 creds.refresh(Request())
             except Exception as e:
-                print(f"Error refreshing token: {e}. Need to re-authenticate.")
+                logger.error(f"Error refreshing token: {e}. Need to re-authenticate.")
                 if os.path.exists(TOKEN_FILE):
                     os.remove(TOKEN_FILE) # Remove invalid token file
                 creds = None # Force re-authentication
         else:
             if not os.path.exists(CREDENTIALS_FILE):
-                print(f"Error: Credentials file '{CREDENTIALS_FILE}' not found.")
-                print("Please download it from Google Cloud Console and place it here.")
+                logger.error(f"Error: Credentials file '{CREDENTIALS_FILE}' not found.")
+                logger.info("Please download it from Google Cloud Console and place it here.")
                 exit(1)
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(
                     CREDENTIALS_FILE, SCOPES)
-                # Pass a specific port (e.g., 8080) or let it choose dynamically (port=0)
-                # Using a fixed port can sometimes help in restricted environments.
                 creds = flow.run_local_server(port=0)
             except Exception as e:
-                print(f"Error during authentication flow: {e}")
+                logger.error(f"Error during authentication flow: {e}")
                 exit(1)
 
-        # Save the credentials for the next run
         try:
             with open(TOKEN_FILE, 'wb') as token:
                 pickle.dump(creds, token)
-            print(f"Authentication successful. Token saved to {TOKEN_FILE}")
+            logger.info(f"Authentication successful. Token saved to {TOKEN_FILE}")
         except IOError as e:
-            print(f"Error saving token file: {e}")
+            logger.warning(f"Error saving token file: {e}")
             # Continue execution even if token saving fails, but warn user.
 
     if not creds:
-        print("Authentication failed.")
+        logger.error("Authentication failed.")
         exit(1)
 
     return creds
@@ -170,7 +170,7 @@ def get_photos_service(credentials: Any) -> Resource:
         service = build(API_SERVICE_NAME, API_VERSION, credentials=credentials, static_discovery=False)
         return service
     except Exception as e:
-        print(f"Error building Google Photos service: {e}")
+        logger.error(f"Error building Google Photos service: {e}")
         exit(1)
 
 # --- Album Operations ---
@@ -178,7 +178,7 @@ def list_albums(service: Resource) -> List[Dict[str, Any]]:
     """Fetches and returns a list of all albums."""
     albums = []
     next_page_token = None
-    print("Fetching albums...")
+    logger.info("Fetching albums...")
     try:
         while True:
             results = service.albums().list(
@@ -189,37 +189,37 @@ def list_albums(service: Resource) -> List[Dict[str, Any]]:
             found_albums = results.get('albums', [])
             if found_albums:
                 albums.extend(found_albums)
-                print(f"Found {len(found_albums)} albums (Total: {len(albums)})...")
+                logger.info(f"Found {len(found_albums)} albums (Total: {len(albums)})...")
             else:
-                 print("No albums found on this page.")
+                logger.info("No albums found on this page.")
 
             next_page_token = results.get('nextPageToken')
             if not next_page_token:
                 break
             time.sleep(0.5) # Small delay between pages
     except HttpError as error:
-        print(f"An API error occurred while listing albums: {error}")
+        logger.error(f"An API error occurred while listing albums: {error}")
     except Exception as e:
-        print(f"An unexpected error occurred while listing albums: {e}")
+        logger.error(f"An unexpected error occurred while listing albums: {e}")
 
-    print(f"Finished fetching. Total albums found: {len(albums)}")
+    logger.info(f"Finished fetching. Total albums found: {len(albums)}")
     return albums
 
 def get_album_by_id(service: Resource, album_id: str) -> Optional[Dict[str, Any]]:
     """Fetches a specific album by its ID."""
-    print(f"Fetching album details for ID: {album_id}...")
+    logger.info(f"Fetching album details for ID: {album_id}...")
     try:
         album = service.albums().get(albumId=album_id).execute()
-        print(f"Found album: '{album.get('title', 'Untitled')}'")
+        logger.info(f"Found album: '{album.get('title', 'Untitled')}'")
         return album
     except HttpError as error:
         if error.resp.status == 404:
-            print(f"Error: Album with ID '{album_id}' not found.")
+            logger.error(f"Error: Album with ID '{album_id}' not found.")
         else:
-            print(f"An API error occurred while fetching album {album_id}: {error}")
+            logger.error(f"An API error occurred while fetching album {album_id}: {error}")
         return None
     except Exception as e:
-        print(f"An unexpected error occurred while fetching album {album_id}: {e}")
+        logger.error(f"An unexpected error occurred while fetching album {album_id}: {e}")
         return None
 
 # --- Media Item Operations ---
@@ -227,7 +227,7 @@ def get_album_media_items(service: Resource, album_id: str) -> List[Dict[str, An
     """Fetches all media items for a given album ID."""
     media_items = []
     next_page_token = None
-    print(f"Fetching media items for album ID: {album_id}...")
+    logger.info(f"Fetching media items for album ID: {album_id}...")
     try:
         while True:
             results = service.mediaItems().search(
@@ -240,22 +240,21 @@ def get_album_media_items(service: Resource, album_id: str) -> List[Dict[str, An
 
             found_items = results.get('mediaItems', [])
             if found_items:
-                 media_items.extend(found_items)
-                 print(f"Found {len(found_items)} media items (Total: {len(media_items)})...")
+                media_items.extend(found_items)
+                logger.info(f"Found {len(found_items)} media items (Total: {len(media_items)})...")
             else:
-                print("No media items found on this page.")
-
+                logger.info("No media items found on this page.")
 
             next_page_token = results.get('nextPageToken')
             if not next_page_token:
                 break
             time.sleep(0.5) # Small delay between pages
     except HttpError as error:
-        print(f"An API error occurred while fetching media items for album {album_id}: {error}")
+        logger.error(f"An API error occurred while fetching media items for album {album_id}: {error}")
     except Exception as e:
-        print(f"An unexpected error occurred while fetching media items for album {album_id}: {e}")
+        logger.error(f"An unexpected error occurred while fetching media items for album {album_id}: {e}")
 
-    print(f"Finished fetching. Total media items found: {len(media_items)}")
+    logger.info(f"Finished fetching. Total media items found: {len(media_items)}")
     return media_items
 
 def download_media_item(
@@ -271,19 +270,17 @@ def download_media_item(
     base_url = media_item.get('baseUrl')
 
     if not base_url:
-        print(f"Warning: Media item {item_id} ('{filename}') has no base URL. Skipping.")
+        logger.warning(f"Warning: Media item {item_id} ('{filename}') has no base URL. Skipping.")
         return False
 
-    # Determine download URL (photos need '=d', videos usually don't)
-    # The API docs suggest using '=d' for direct download.
     download_url = f"{base_url}=d"
 
     filepath = download_path / filename
     if filepath.exists():
-        print(f"Skipping download, file already exists: {filepath.name}")
+        logger.info(f"Skipping download, file already exists: {filepath.name}")
         return True # Treat as success if already exists
 
-    print(f"  Downloading: {filename}...")
+    logger.info(f"  Downloading: {filename}...")
 
     for attempt in range(max_retries):
         try:
@@ -293,26 +290,25 @@ def download_media_item(
             with open(filepath, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
-            print(f"  Successfully downloaded: {filename}")
+            logger.info(f"  Successfully downloaded: {filename}")
             return True
 
         except requests.exceptions.RequestException as e:
-            print(f"  Error downloading {filename} (Attempt {attempt + 1}/{max_retries}): {e}")
+            logger.error(f"  Error downloading {filename} (Attempt {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
-                print(f"  Retrying in {retry_delay} seconds...")
+                logger.info(f"  Retrying in {retry_delay} seconds...")
                 time.sleep(retry_delay)
             else:
-                print(f"  Failed to download {filename} after {max_retries} attempts.")
-                # Optionally remove partially downloaded file
+                logger.error(f"  Failed to download {filename} after {max_retries} attempts.")
                 if filepath.exists():
                     try:
                         filepath.unlink()
                     except OSError as unlink_err:
-                        print(f"  Warning: Could not remove partial file {filepath}: {unlink_err}")
+                        logger.warning(f"  Warning: Could not remove partial file {filepath}: {unlink_err}")
                 return False
-        except Exception as e: # Catch other potential errors during file writing etc.
-             print(f"  An unexpected error occurred during download of {filename}: {e}")
-             return False # Don't retry on unexpected errors
+        except Exception as e:
+            logger.error(f"  An unexpected error occurred during download of {filename}: {e}")
+            return False
 
     return False # Should not be reached, but ensures a return value
 
@@ -327,96 +323,83 @@ def download_album(
     """Downloads all media items in an album and zips them."""
     album_id = album.get('id')
     album_title = album.get('title', f"Untitled_Album_{album_id}")
-    # Sanitize title for filesystem use
     safe_album_title = "".join(c for c in album_title if c.isalnum() or c in (' ', '_', '-')).rstrip()
-    if not safe_album_title: # Handle cases where title becomes empty after sanitizing
+    if not safe_album_title:
         safe_album_title = f"Album_{album_id}"
 
-    print(f"\nProcessing album: '{album_title}' (ID: {album_id})")
+    logger.info(f"\nProcessing album: '{album_title}' (ID: {album_id})")
 
     media_items = get_album_media_items(service, album_id)
     if not media_items:
-        print(f"No media items found in album '{album_title}'. Skipping zip creation.")
+        logger.info(f"No media items found in album '{album_title}'. Skipping zip creation.")
         return
 
-    # Create a temporary directory for this album's downloads
     temp_album_dir = base_download_dir / f"{safe_album_title}_temp"
     zip_file_path = base_download_dir / f"{safe_album_title}.zip"
 
     if zip_file_path.exists():
-        print(f"Zip file already exists: {zip_file_path.name}. Skipping download.")
+        logger.info(f"Zip file already exists: {zip_file_path.name}. Skipping download.")
         return
 
     try:
         temp_album_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Created temporary directory: {temp_album_dir}")
+        logger.info(f"Created temporary directory: {temp_album_dir}")
 
         download_count = 0
         fail_count = 0
         total_items = len(media_items)
 
-        # Use a session for potential connection reuse
         with requests.Session() as session:
-            # Add authentication headers if needed (usually not for baseUrl=d)
-            # Check Google Photos API docs if direct downloads require auth headers
-            pass
-
-            for i, item in enumerate(media_items):
-                print(f" Album '{safe_album_title}' - Item {i+1}/{total_items}")
-                if download_media_item(session, item, temp_album_dir, max_retries, retry_delay):
-                    download_count += 1
-                else:
-                    fail_count += 1
-                time.sleep(0.1) # Small delay between downloads
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_item = {executor.submit(download_media_item, session, item, temp_album_dir, max_retries, retry_delay): item for item in media_items}
+                for future in tqdm(as_completed(future_to_item), total=total_items, desc=f"Downloading {safe_album_title}"):
+                    if future.result():
+                        download_count += 1
+                    else:
+                        fail_count += 1
 
         if fail_count > 0:
-            print(f"Warning: Failed to download {fail_count} items for album '{safe_album_title}'.")
+            logger.warning(f"Warning: Failed to download {fail_count} items for album '{safe_album_title}'.")
 
         if download_count == 0 and fail_count > 0:
-             print(f"Error: No items were successfully downloaded for album '{safe_album_title}'. Skipping zip creation.")
-             # Clean up temp dir early if nothing was downloaded
-             try:
-                 for item_path in temp_album_dir.iterdir():
-                     item_path.unlink()
-                 temp_album_dir.rmdir()
-                 print(f"Removed empty temporary directory: {temp_album_dir}")
-             except OSError as e:
-                 print(f"Error removing temporary directory {temp_album_dir}: {e}")
-             return # Exit function early
+            logger.error(f"Error: No items were successfully downloaded for album '{safe_album_title}'. Skipping zip creation.")
+            try:
+                for item_path in temp_album_dir.iterdir():
+                    item_path.unlink()
+                temp_album_dir.rmdir()
+                logger.info(f"Removed empty temporary directory: {temp_album_dir}")
+            except OSError as e:
+                logger.error(f"Error removing temporary directory {temp_album_dir}: {e}")
+            return
 
-        # Create the zip file
-        print(f"Creating zip file: {zip_file_path.name}...")
+        logger.info(f"Creating zip file: {zip_file_path.name}...")
         try:
             with zipfile.ZipFile(zip_file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for item_path in temp_album_dir.iterdir():
-                    if item_path.is_file(): # Ensure it's a file before adding
+                    if item_path.is_file():
                         zipf.write(item_path, arcname=item_path.name)
-            print(f"Successfully created zip file: {zip_file_path.name}")
+            logger.info(f"Successfully created zip file: {zip_file_path.name}")
         except zipfile.BadZipFile as e:
-            print(f"Error creating zip file {zip_file_path.name}: {e}")
-            # Optionally remove corrupted zip file
+            logger.error(f"Error creating zip file {zip_file_path.name}: {e}")
             if zip_file_path.exists():
                 try:
                     zip_file_path.unlink()
                 except OSError as unlink_err:
-                    print(f"Warning: Could not remove corrupted zip file {zip_file_path}: {unlink_err}")
+                    logger.warning(f"Warning: Could not remove corrupted zip file {zip_file_path}: {unlink_err}")
         except OSError as e:
-             print(f"File system error during zipping for {zip_file_path.name}: {e}")
-
+            logger.error(f"File system error during zipping for {zip_file_path.name}: {e}")
 
     finally:
-        # Clean up the temporary directory
         if temp_album_dir.exists():
-            print(f"Cleaning up temporary directory: {temp_album_dir}")
+            logger.info(f"Cleaning up temporary directory: {temp_album_dir}")
             try:
                 for item_path in temp_album_dir.iterdir():
-                    item_path.unlink() # Delete files first
-                temp_album_dir.rmdir() # Delete empty directory
-                print(f"Removed temporary directory: {temp_album_dir}")
+                    item_path.unlink()
+                temp_album_dir.rmdir()
+                logger.info(f"Removed temporary directory: {temp_album_dir}")
             except OSError as e:
-                print(f"Error removing temporary directory {temp_album_dir}: {e}")
-                print("Please remove it manually.")
-
+                logger.error(f"Error removing temporary directory {temp_album_dir}: {e}")
+                logger.info("Please remove it manually.")
 
 # --- Main Execution ---
 def main():
@@ -424,7 +407,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Download Google Photos albums.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=README_TEXT # Display README as part of help
+        epilog=README_TEXT
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -444,13 +427,11 @@ def main():
         help='Download all albums.'
     )
 
-    # Add a hidden argument to just show the readme
     parser.add_argument(
         '--readme',
         action='store_true',
-        help=argparse.SUPPRESS # Hide from standard help
+        help=argparse.SUPPRESS
     )
-
 
     args = parser.parse_args()
 
@@ -458,21 +439,18 @@ def main():
         print(README_TEXT)
         exit(0)
 
-    # If no arguments were given, print help and exit
     if not args.list and not args.album_id and not args.all:
         parser.print_help()
         exit(0)
 
-    print("Starting Google Photos Downloader...")
+    logger.info("Starting Google Photos Downloader...")
 
-    # Ensure download directory exists
     try:
         DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        print(f"Downloads will be saved to: {DOWNLOAD_DIR.resolve()}")
+        logger.info(f"Downloads will be saved to: {DOWNLOAD_DIR.resolve()}")
     except OSError as e:
-        print(f"Error creating download directory {DOWNLOAD_DIR}: {e}")
+        logger.error(f"Error creating download directory {DOWNLOAD_DIR}: {e}")
         exit(1)
-
 
     credentials = authenticate()
     service = get_photos_service(credentials)
@@ -480,35 +458,34 @@ def main():
     if args.list:
         albums = list_albums(service)
         if albums:
-            print("\nAvailable Albums:")
-            print("-" * 30)
+            logger.info("\nAvailable Albums:")
+            logger.info("-" * 30)
             for album in albums:
-                print(f"  Title: {album.get('title', 'Untitled')}")
-                print(f"  ID:    {album.get('id')}")
-                print("-" * 30)
+                logger.info(f"  Title: {album.get('title', 'Untitled')}")
+                logger.info(f"  ID:    {album.get('id')}")
+                logger.info("-" * 30)
         else:
-            print("No albums found in your library.")
+            logger.info("No albums found in your library.")
 
     elif args.album_id:
         album = get_album_by_id(service, args.album_id)
         if album:
             download_album(service, album, DOWNLOAD_DIR, MAX_RETRIES, RETRY_DELAY)
         else:
-            print(f"Could not proceed with download for album ID: {args.album_id}")
-
+            logger.error(f"Could not proceed with download for album ID: {args.album_id}")
 
     elif args.all:
         albums = list_albums(service)
         if albums:
-            print(f"\nStarting download for {len(albums)} albums...")
+            logger.info(f"\nStarting download for {len(albums)} albums...")
             for i, album in enumerate(albums):
-                print(f"\n--- Album {i+1}/{len(albums)} ---")
+                logger.info(f"\n--- Album {i+1}/{len(albums)} ---")
                 download_album(service, album, DOWNLOAD_DIR, MAX_RETRIES, RETRY_DELAY)
-            print("\nFinished downloading all albums.")
+            logger.info("\nFinished downloading all albums.")
         else:
-            print("No albums found to download.")
+            logger.info("No albums found to download.")
 
-    print("\nGoogle Photos Downloader finished.")
+    logger.info("\nGoogle Photos Downloader finished.")
 
 if __name__ == '__main__':
     main()
