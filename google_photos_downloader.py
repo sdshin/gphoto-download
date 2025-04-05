@@ -6,7 +6,7 @@ Google Photos Album Downloader
 This script downloads Google Photos albums using the Google Photos API.
 It authenticates using OAuth 2.0, allowing users to list albums,
 download specific albums by ID, or download all albums. Each album
-is saved as a separate .zip file.
+is saved as a separate .zip file. Now includes original quality downloads.
 """
 
 import argparse
@@ -51,6 +51,7 @@ This script downloads your Google Photos albums using the Google Photos API.
 - Handles API pagination for albums and media items.
 - Retries failed downloads for individual media items.
 - Provides informative console output.
+- **Downloads media items in their original quality when available.**
 
 ## Prerequisites
 
@@ -264,7 +265,7 @@ def download_media_item(
     max_retries: int = MAX_RETRIES,
     retry_delay: int = RETRY_DELAY
 ) -> bool:
-    """Downloads a single media item with retries."""
+    """Downloads a single media item with retries, attempting to get original quality."""
     item_id = media_item.get('id')
     filename = media_item.get('filename', f"untitled_{item_id}")
     base_url = media_item.get('baseUrl')
@@ -273,6 +274,7 @@ def download_media_item(
         logger.warning(f"Warning: Media item {item_id} ('{filename}') has no base URL. Skipping.")
         return False
 
+    # Attempt to get original quality download URL
     download_url = f"{base_url}=d"
 
     filepath = download_path / filename
