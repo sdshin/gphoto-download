@@ -1,0 +1,18 @@
+Please generate a Python script that downloads Google Photos albums, saving each album as a separate .zip file. The script should:
+
+-   Use the Google Photos API.
+-   Handle authentication using credentials.json and token.json.
+-   Provide a command-line interface with the following options:
+    -   `--list`: List album names and IDs, then exit.
+    -   `--album-id <album_id>`: Download a specific album by its ID.
+    -   `--all`: Download all albums.
+    -   `--help`: Display a help message.
+-   If no options are provided, display the help message and exit.
+-   Include comprehensive error handling for API requests, file operations, and authentication.
+-   Retry failed downloads of individual media items.
+-   Create a zip archive for each album, including the media items.
+-   Print informative messages to the console during the process.
+-   Adhere to modern command-line application design principles.
+-   Include a comprehensive README.md section within the code as a multi-line string.
+
+The code should be well-structured, with clear function definitions and type hints.
